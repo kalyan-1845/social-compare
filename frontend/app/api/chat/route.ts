@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
+export const runtime = 'edge';
+
 // Transcript fallbacks matching the backend uploader pipeline
 const video_a_segments = [
   { text: "Hey everyone! Welcome back to my channel. Today, we are deep diving into some incredible creator strategies.", start: 0, timestamp: "00:00" },

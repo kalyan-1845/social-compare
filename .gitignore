@@ -1,0 +1,11 @@
+node_modules/
+.next/
+__pycache__/
+*.pyc
+git_history.log
+script_output.log
+test_write.txt
+.env
+.env.local
+.chroma_db
+chroma_db/

@@ -24,12 +24,13 @@ const video_b_segments = [
 
 // Helper to calculate dot product for normalized embedding vectors (cosine similarity)
 function dotProduct(a: number[], b: number[]): number {
-  return a.reduce((sum, val, idx) => sum + val * b[idx], 0);
+  if (!a || !b) return 0;
+  return a.reduce((sum, val, idx) => sum + val * (b[idx] || 0), 0);
 }
 
 export async function POST(request: Request) {
   try {
-    const { question, chat_history } = await request.json();
+    const { question, chat_history = [] } = await request.json();
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {

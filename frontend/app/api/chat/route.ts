@@ -1,10 +1,7 @@
 import { NextResponse } from 'next/server';
-import { MemoryVectorStore } from 'langchain/vectorstores/memory';
-import { OpenAIEmbeddings } from '@langchain/openai';
-import { Document } from 'langchain/document';
 import OpenAI from 'openai';
 
-// Transcript fallbacks matching the FastAPI backend uploader pipeline
+// Transcript fallbacks matching the backend uploader pipeline
 const video_a_segments = [
   { text: "Hey everyone! Welcome back to my channel. Today, we are deep diving into some incredible creator strategies.", start: 0, timestamp: "00:00" },
   { text: "In this video, I'm sharing my blueprint for viral success, comparing my top performance frameworks,", start: 10, timestamp: "00:10" },
@@ -22,6 +19,11 @@ const video_b_segments = [
   { text: "but because I structured it with a fast-paced looping hook and an open loop at the end, it is already pushing", start: 32, timestamp: "00:32" },
   { text: "to 250k views. Save this reel for later and check the description for the exact hooks I use to scale accounts.", start: 40, timestamp: "00:40" }
 ];
+
+// Helper to calculate dot product for normalized embedding vectors (cosine similarity)
+function dotProduct(a: number[], b: number[]): number {
+  return a.reduce((sum, val, idx) => sum + val * b[idx], 0);
+}
 
 export async function POST(request: Request) {
   try {
@@ -52,42 +54,60 @@ export async function POST(request: Request) {
       follower_count: 125000
     };
 
-    // 1. Context retrieval using LangChain MemoryVectorStore & OpenAI Embeddings
-    const embeddings = new OpenAIEmbeddings({ 
-      openAIApiKey: apiKey, 
-      modelName: "text-embedding-3-small" 
-    });
-    const vectorStore = new MemoryVectorStore(embeddings);
-
-    const docs = [
-      ...video_a_segments.map(seg => new Document({
-        pageContent: seg.text,
-        metadata: { video_id: "A", source_platform: "YouTube", creator: video_a_meta.creator, timestamp: seg.timestamp }
+    // 1. Prepare segments for embedding comparison
+    const segments = [
+      ...video_a_segments.map(seg => ({
+        text: seg.text,
+        video_id: "A",
+        source_platform: "YouTube",
+        creator: video_a_meta.creator,
+        timestamp: seg.timestamp
       })),
-      ...video_b_segments.map(seg => new Document({
-        pageContent: seg.text,
-        metadata: { video_id: "B", source_platform: "Instagram", creator: video_b_meta.creator, timestamp: seg.timestamp }
+      ...video_b_segments.map(seg => ({
+        text: seg.text,
+        video_id: "B",
+        source_platform: "Instagram",
+        creator: video_b_meta.creator,
+        timestamp: seg.timestamp
       }))
     ];
 
-    await vectorStore.addDocuments(docs);
-    const retrievedDocs = await vectorStore.similaritySearch(question, 5);
+    const openai = new OpenAI({ apiKey });
+
+    // 2. Generate embeddings in a single optimized request
+    const segmentTexts = segments.map(s => s.text);
+    const embeddingsResponse = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: [question, ...segmentTexts]
+    });
+
+    const queryEmbedding = embeddingsResponse.data[0].embedding;
+    const segmentEmbeddings = embeddingsResponse.data.slice(1).map(d => d.embedding);
+
+    // 3. Compute similarities and score segments
+    const scoredSegments = segments.map((seg, idx) => {
+      const similarity = dotProduct(queryEmbedding, segmentEmbeddings[idx]);
+      return { ...seg, similarity };
+    });
+
+    // Sort by descending similarity and retrieve the top 5
+    scoredSegments.sort((a, b) => b.similarity - a.similarity);
+    const retrievedDocs = scoredSegments.slice(0, 5);
 
     // Structure citations to pass to frontend
     const citations: any[] = [];
     const uniqueCitations = new Set<string>();
     
     for (const doc of retrievedDocs) {
-      const meta = doc.metadata;
-      const citKey = `${meta.video_id}_${meta.timestamp}`;
+      const citKey = `${doc.video_id}_${doc.timestamp}`;
       if (!uniqueCitations.has(citKey)) {
         uniqueCitations.add(citKey);
         citations.push({
-          video_id: meta.video_id,
-          source_platform: meta.source_platform,
-          creator: meta.creator,
-          timestamp: meta.timestamp,
-          content: doc.pageContent.length > 150 ? doc.pageContent.slice(0, 150) + "..." : doc.pageContent
+          video_id: doc.video_id,
+          source_platform: doc.source_platform,
+          creator: doc.creator,
+          timestamp: doc.timestamp,
+          content: doc.text.length > 150 ? doc.text.slice(0, 150) + "..." : doc.text
         });
       }
     }
@@ -95,8 +115,7 @@ export async function POST(request: Request) {
     // Build context strings for prompt
     let contextStr = "";
     retrievedDocs.forEach((doc, idx) => {
-      const m = doc.metadata;
-      contextStr += `[${idx + 1}] Video ${m.video_id} (${m.source_platform}) by ${m.creator} at ${m.timestamp}:\n${doc.pageContent}\n\n`;
+      contextStr += `[${idx + 1}] Video ${doc.video_id} (${doc.source_platform}) by ${doc.creator} at ${doc.timestamp}:\n${doc.text}\n\n`;
     });
 
     const metricsCtx = `Comparison Data:
@@ -130,7 +149,7 @@ ${contextStr}
 
 User Question: ${question}`;
 
-    // 2. Prepare streaming messages array
+    // 4. Prepare streaming messages array
     const messages: any[] = [
       { role: "system", content: systemPrompt }
     ];
@@ -147,8 +166,7 @@ User Question: ${question}`;
       content: userContent
     });
 
-    // 3. Initiate OpenAI completion stream
-    const openai = new OpenAI({ apiKey });
+    // 5. Initiate OpenAI completion stream
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages,
@@ -156,7 +174,7 @@ User Question: ${question}`;
       temperature: 0.3
     });
 
-    // 4. Stream Server-Sent Events (SSE)
+    // 6. Stream Server-Sent Events (SSE)
     const encoder = new TextEncoder();
     const customStream = new ReadableStream({
       async start(controller) {
